@@ -1,0 +1,185 @@
+/**
+ * 웹 앱 진입점
+ */
+function doGet() {
+  return HtmlService.createTemplateFromFile('index')
+    .evaluate()
+    .setTitle('일정관리 프로그램')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * 시트 초기화 및 헤더 체크
+ */
+function getSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName('Schedules');
+  const headers = ['id', 'title', 'date', 'time', 'location', 'description', 'type', 'importance', 'status', 'updatedAt'];
+  
+  if (!sheet) {
+    sheet = ss.insertSheet('Schedules');
+    sheet.appendRow(headers);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/**
+ * 환경설정 시트 가져오기 (단일 행 유지 보장)
+ */
+function getSettingsSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName('Settings');
+  if (!sheet) {
+    sheet = ss.insertSheet('Settings');
+    sheet.appendRow(['email', 'notificationHour', 'updatedAt']);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/**
+ * 설정값 불러오기
+ */
+function getSettings() {
+  const sheet = getSettingsSheet();
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { email: Session.getActiveUser().getEmail(), notificationHour: "08" };
+  return {
+    email: data[1][0],
+    notificationHour: data[1][1]
+  };
+}
+
+/**
+ * 설정값 저장 (중복 저장 방지 및 트리거 재설정)
+ */
+function saveSettings(settings) {
+  const sheet = getSettingsSheet();
+  const headers = ['email', 'notificationHour', 'updatedAt'];
+  
+  sheet.clear(); 
+  sheet.appendRow(headers);
+  sheet.appendRow([settings.email, settings.notificationHour, new Date()]);
+  sheet.setFrozenRows(1);
+  
+  manageTriggers(parseInt(settings.notificationHour));
+  return "Success";
+}
+
+/**
+ * 시간 기반 트리거 관리
+ */
+function manageTriggers(hour) {
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(t => {
+    if (t.getHandlerFunction() === 'sendDailyNotification') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+  
+  // 매일 지정된 시간에 실행되는 트리거 생성
+  ScriptApp.newTrigger('sendDailyNotification')
+    .timeBased()
+    .everyDays(1)
+    .atHour(hour)
+    .nearMinute(0) // 정각 근처 실행 시도
+    .create();
+}
+
+/**
+ * 매일 일정 메일 발송 로직 (Schedule과 Habit 모두 포함)
+ */
+function sendDailyNotification() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tz = ss.getSpreadsheetTimeZone(); // 스프레드시트 시간대 사용
+  const settings = getSettings();
+  
+  if (!settings.email) return;
+  
+  const todayStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd");
+  const items = loadData();
+  
+  // 오늘 날짜이고 Schedule 또는 Habit인 항목 필터링
+  const todayItems = items.filter(it => it.date === todayStr && (it.type === 'Schedule' || it.type === 'Habit'));
+  
+  if (todayItems.length === 0) return; 
+  
+  const body = todayItems.map(s => {
+    const typeLabel = s.type === 'Habit' ? '[습관]' : '[일정]';
+    const timePart = s.time ? ` [${s.time}]` : "";
+    const locPart = s.location ? ` @${s.location}` : "";
+    const importance = s.importance && s.importance !== 'None' ? ` (${s.importance})` : "";
+    return `- ${typeLabel}${importance} ${s.title}${timePart}${locPart}`;
+  }).join('\n');
+  
+  const subject = `[PLANNER] ${todayStr} 오늘의 할 일 알림`;
+  const message = `안녕하세요,\n\n오늘(${todayStr}) 예정된 리스트입니다:\n\n${body}\n\n오늘도 좋은 하루 되세요!`;
+  
+  GmailApp.sendEmail(settings.email, subject, message);
+}
+
+/**
+ * 모든 일정 데이터 읽기
+ */
+function loadData() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const tz = ss.getSpreadsheetTimeZone();
+    const sheet = getSheet();
+    const values = sheet.getDataRange().getValues();
+    if (values.length <= 1) return [];
+    
+    const headers = values.shift();
+    return values.map(row => {
+      let obj = {};
+      headers.forEach((header, i) => {
+        let val = row[i];
+        if (val instanceof Date) {
+          val = (header === 'date') 
+            ? Utilities.formatDate(val, tz, "yyyy-MM-dd")
+            : Utilities.formatDate(val, tz, "yyyy-MM-dd HH:mm:ss");
+        }
+        if (header === 'id') val = val.toString();
+        obj[header] = val || "";
+      });
+      return obj;
+    });
+  } catch (e) {
+    console.error("loadData error: " + e.message);
+    return [];
+  }
+}
+
+/**
+ * 데이터 저장
+ */
+function saveData(items) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tz = ss.getSpreadsheetTimeZone();
+  const sheet = getSheet();
+  const headers = ['id', 'title', 'date', 'time', 'location', 'description', 'type', 'importance', 'status', 'updatedAt'];
+  
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clearContent();
+  }
+  
+  if (items && items.length > 0) {
+    const rows = items.map(item => [
+      item.id || "", 
+      item.title || "", 
+      item.date || "", 
+      item.time || "", 
+      item.location || "", 
+      item.description || "", 
+      item.type || "Schedule", 
+      item.importance || "None", 
+      item.status || "", 
+      Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss")
+    ]);
+    sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  }
+  return "Success";
+}
