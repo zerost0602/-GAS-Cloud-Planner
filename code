@@ -26,49 +26,67 @@ function getSheet() {
 }
 
 /**
- * 환경설정 시트 가져오기 (단일 행 유지 보장)
+ * 환경설정 시트 가져오기 (단일 행 유지 보장 및 카테고리 헤더 지원)
  */
 function getSettingsSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName('Settings');
+  const headers = ['botToken', 'chatId', 'notificationHour', 'updatedAt', 'categories'];
+  
   if (!sheet) {
     sheet = ss.insertSheet('Settings');
-    sheet.appendRow(['botToken', 'chatId', 'notificationHour', 'updatedAt']);
+    sheet.appendRow(headers);
     sheet.setFrozenRows(1);
+  } else {
+    // 하위 호환성: categories 열이 없는 경우 추가
+    const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    if (currentHeaders.indexOf('categories') === -1) {
+      sheet.getRange(1, currentHeaders.length + 1).setValue('categories');
+    }
   }
   return sheet;
 }
 
 /**
- * 설정값 불러오기 (하위 호환성 유지)
+ * 설정값 불러오기 (하위 호환성 및 기본 카테고리 지원)
  */
 function getSettings() {
   try {
     const sheet = getSettingsSheet();
     const data = sheet.getDataRange().getValues();
+    const defaultCats = JSON.stringify([
+      { name: "Work", color: "#3b82f6" },
+      { name: "Personal", color: "#10b981" },
+      { name: "Exercise", color: "#f97316" }
+    ]);
+
     if (data.length <= 1) {
-      return { success: true, data: { botToken: "", chatId: "", notificationHour: "08" } };
+      return { success: true, data: { botToken: "", chatId: "", notificationHour: "08", categories: defaultCats } };
     }
     
     const headers = data[0];
     const botTokenIndex = headers.indexOf('botToken');
     const chatIdIndex = headers.indexOf('chatId');
     const hourIndex = headers.indexOf('notificationHour');
+    const categoriesIndex = headers.indexOf('categories');
     
     let botToken = "";
     let chatId = "";
     let notificationHour = "08";
+    let categories = defaultCats;
     
     if (botTokenIndex !== -1 && data.length > 1) botToken = data[1][botTokenIndex];
     if (chatIdIndex !== -1 && data.length > 1) chatId = data[1][chatIdIndex];
     if (hourIndex !== -1 && data.length > 1) notificationHour = data[1][hourIndex];
+    if (categoriesIndex !== -1 && data.length > 1) categories = data[1][categoriesIndex] || defaultCats;
     
     return {
       success: true,
       data: {
         botToken: botToken,
         chatId: chatId,
-        notificationHour: notificationHour
+        notificationHour: notificationHour,
+        categories: categories
       }
     };
   } catch (e) {
@@ -83,14 +101,25 @@ function getSettings() {
 function saveSettings(settings) {
   try {
     const sheet = getSettingsSheet();
-    const headers = ['botToken', 'chatId', 'notificationHour', 'updatedAt'];
+    const headers = ['botToken', 'chatId', 'notificationHour', 'updatedAt', 'categories'];
+    const defaultCats = JSON.stringify([
+      { name: "Work", color: "#3b82f6" },
+      { name: "Personal", color: "#10b981" },
+      { name: "Exercise", color: "#f97316" }
+    ]);
     
     sheet.clear(); 
     sheet.appendRow(headers);
-    sheet.appendRow([settings.botToken, settings.chatId, settings.notificationHour, new Date()]);
+    sheet.appendRow([
+      settings.botToken || "", 
+      settings.chatId || "", 
+      settings.notificationHour || "08", 
+      new Date(), 
+      settings.categories || defaultCats
+    ]);
     sheet.setFrozenRows(1);
     
-    manageTriggers(parseInt(settings.notificationHour));
+    manageTriggers(parseInt(settings.notificationHour || "8"));
     return { success: true };
   } catch (e) {
     console.error("saveSettings error: " + e.message);
